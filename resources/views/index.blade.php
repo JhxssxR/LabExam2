@@ -35,9 +35,33 @@
 					</tr>
 				</thead>
 				<tbody>
-					<tr class="table-row">
-						<td colspan="5" style="text-align:center;color:var(--muted);padding:46px 18px">No recipes found. Click "Add Recipe" to get started.</td>
-					</tr>
+					@isset($recipes)
+						@forelse($recipes as $recipe)
+							<tr data-id="{{ $recipe->id }}" data-ingredients='@json($recipe->ingredients)' data-instructions='@json($recipe->instructions)'>
+							<td>
+								<div style="display:flex;flex-direction:column">
+									<div class="recipe-name" style="font-weight:600">{{ $recipe->name }}</div>
+									<div class="recipe-desc" style="color:var(--muted);font-size:13px">{{ $recipe->description }}</div>
+								</div>
+							</td>
+							<td><span class="badge">{{ $recipe->category }}</span></td>
+							<td class="meta"><span>{{ $recipe->prep ?? '' }} / {{ $recipe->cook ?? '' }}</span><span style="display:none">{{ $recipe->servings ?? '' }}</span></td>
+							<td><span>{{ $recipe->servings ?? '' }}</span></td>
+							<td>
+								<button class="action-edit">Edit</button>
+								<button class="action-delete">Delete</button>
+							</td>
+						</tr>
+						@empty
+						<tr class="table-row">
+							<td colspan="5" style="text-align:center;color:var(--muted);padding:46px 18px">No recipes found. Click "Add Recipe" to get started.</td>
+						</tr>
+						@endforelse
+					@else
+						<tr class="table-row">
+							<td colspan="5" style="text-align:center;color:var(--muted);padding:46px 18px">No recipes found. Click "Add Recipe" to get started.</td>
+						</tr>
+					@endisset
 				</tbody>
 			</table>
 		</div>
@@ -47,7 +71,10 @@
 @section('scripts')
 <script>
 	(function(){
-		const createModal = () => {
+	let currentMode = 'add';
+	let editingId = null;
+
+	const createModal = () => {
 			const html = `
 			<div class="modal-backdrop" id="recipe-modal" role="dialog" aria-modal="true" aria-hidden="true">
 				<div class="modal-card" role="document">
@@ -130,13 +157,38 @@
 			modal.classList.add('show');
 			modal.setAttribute('aria-hidden','false');
 			if(mode === 'edit' && row){
-				// populate
-				document.getElementById('m-name').value = row.querySelector('.recipe-name')?.textContent?.trim() || '';
-				document.getElementById('m-desc').value = row.querySelector('.recipe-desc')?.textContent?.trim() || '';
-				document.getElementById('m-category').value = row.querySelector('.badge')?.textContent?.trim() || '';
-				const metaSpans = row.querySelectorAll('.meta span');
-				if(metaSpans.length>1) document.getElementById('m-servings').value = metaSpans[1].textContent.trim();
+				// fetch the full recipe from server (uses data-id if present)
+				editingId = row.dataset.id || null;
+				if (!editingId) {
+					// fallback to DOM values
+					document.getElementById('m-name').value = row.querySelector('.recipe-name')?.textContent?.trim() || '';
+					document.getElementById('m-desc').value = row.querySelector('.recipe-desc')?.textContent?.trim() || '';
+					document.getElementById('m-category').value = row.querySelector('.badge')?.textContent?.trim() || '';
+					const metaSpans = row.querySelectorAll('.meta span');
+					if(metaSpans.length>1) document.getElementById('m-servings').value = metaSpans[1].textContent.trim();
+				} else {
+					fetch('/recipes/' + editingId).then(r => r.json()).then(data => {
+						document.getElementById('m-name').value = data.name || '';
+						document.getElementById('m-desc').value = data.description || '';
+						document.getElementById('m-category').value = data.category || '';
+						document.getElementById('m-servings').value = data.servings || '';
+						document.getElementById('m-prep').value = data.prep ?? '';
+						document.getElementById('m-cook').value = data.cook ?? '';
+						// populate ingredients and instructions lists
+						const ingrList = document.getElementById('ingredients');
+						const instrList = document.getElementById('instructions');
+						ingrList.innerHTML = '';
+						instrList.innerHTML = '';
+						(data.ingredients || []).forEach(i => { const d = document.createElement('div'); d.className='chip'; d.textContent = i; ingrList.appendChild(d); });
+						(data.instructions || []).forEach((ins, idx) => { const d = document.createElement('div'); d.className='chip'; d.textContent = (idx+1)+'. '+ins; instrList.appendChild(d); });
+					}).catch(err => {
+						console.error(err);
+						// fallback to clearing
+						clearModal();
+					});
+				}
 			} else {
+				editingId = null;
 				clearModal();
 			}
 		};
@@ -151,10 +203,39 @@
 		// wire Add Recipe button
 		document.getElementById('open-add').addEventListener('click', (e)=>{ e.preventDefault(); openModal('add'); });
 
-		// delegate edit buttons (if any rows exist later)
+		// delegate edit buttons (opens modal and loads recipe)
 		document.addEventListener('click', function(e){
 			const edit = e.target.closest('.action-edit');
-			if(edit){ e.preventDefault(); const row = edit.closest('tr'); openModal('edit', row); }
+			if(edit){ e.preventDefault(); const row = edit.closest('tr'); currentMode = 'edit'; openModal('edit', row); }
+		});
+
+		// delegate delete buttons (confirm then call API)
+		document.addEventListener('click', function(e){
+			const del = e.target.closest('.action-delete');
+			if(del){
+				e.preventDefault();
+				const row = del.closest('tr');
+				const id = row?.dataset?.id;
+				if(!id){
+					if(!confirm('Delete this recipe?')) return;
+					row.remove();
+					return;
+				}
+				if(!confirm('Delete this recipe?')) return;
+				const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
+				fetch('/recipes/' + id, { method: 'DELETE', headers: { 'X-CSRF-TOKEN': token || '' } }).then(r => {
+					if(r.ok) {
+						row.remove();
+						// if no rows left, show placeholder
+						const tbody = document.querySelector('.panel table tbody');
+						if(!tbody.querySelector('tr')){
+							tbody.innerHTML = '<tr class="table-row"><td colspan="5" style="text-align:center;color:var(--muted);padding:46px 18px">No recipes found. Click "Add Recipe" to get started.</td></tr>';
+						}
+					} else {
+						alert('Failed to delete recipe');
+					}
+				}).catch(err => { console.error(err); alert('Failed to delete recipe'); });
+			}
 		});
 
 		// add ingredient
@@ -167,10 +248,90 @@
 			e.preventDefault(); const val = document.getElementById('m-instruction').value.trim(); if(!val) return; const list=document.getElementById('instructions'); const idx=list.children.length+1; const d=document.createElement('div'); d.className='chip'; d.textContent=idx+'. '+val; list.appendChild(d); document.getElementById('m-instruction').value='';
 		});
 
-		// primary action (add/save) — placeholder: will just close modal
-		primaryBtn.addEventListener('click', function(e){ e.preventDefault(); // TODO: persist
-			closeModal();
+		// primary action (add/save) — collect form data and POST to server
+		primaryBtn.addEventListener('click', function(e){
+			e.preventDefault();
+			const name = document.getElementById('m-name').value.trim();
+			if(!name){ alert('Please enter a recipe name'); return; }
+			const payload = {
+				name: name,
+				description: document.getElementById('m-desc').value.trim(),
+				category: document.getElementById('m-category').value.trim(),
+				servings: document.getElementById('m-servings').value.trim(),
+				prep: document.getElementById('m-prep').value.trim(),
+				cook: document.getElementById('m-cook').value.trim(),
+				ingredients: Array.from(document.getElementById('ingredients').children).map(c=>c.textContent.trim()),
+				instructions: Array.from(document.getElementById('instructions').children).map(c=>c.textContent.replace(/^\d+\.\s*/, '').trim()),
+			};
+
+			const token = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
+
+			// choose POST or PUT depending on mode
+			const method = currentMode === 'edit' && editingId ? 'PUT' : 'POST';
+			const url = currentMode === 'edit' && editingId ? '/recipes/' + editingId : '/recipes';
+
+			fetch(url, {
+				method: method,
+				headers: {
+					'Content-Type': 'application/json',
+					'X-CSRF-TOKEN': token || ''
+				},
+				body: JSON.stringify(payload)
+			}).then(r => r.json()).then(data => {
+				// Update UI: replace "no recipes" row if present, and append new row
+				const tbody = document.querySelector('.panel table tbody');
+				// remove placeholder row if present
+				const placeholder = tbody.querySelector('.table-row');
+				if(placeholder && placeholder.querySelector('td[colspan]')){
+					// if it's the "no recipes" placeholder, clear tbody
+					tbody.innerHTML = '';
+				}
+
+				const tr = document.createElement('tr');
+				tr.setAttribute('data-id', data.id || data.ID || '');
+				if(data.ingredients) tr.setAttribute('data-ingredients', JSON.stringify(data.ingredients));
+				if(data.instructions) tr.setAttribute('data-instructions', JSON.stringify(data.instructions));
+				tr.innerHTML = `
+					<td>
+						<div style="display:flex;flex-direction:column">
+							<div class="recipe-name" style="font-weight:600">${escapeHtml(data.name)}</div>
+							<div class="recipe-desc" style="color:var(--muted);font-size:13px">${escapeHtml(data.description || '')}</div>
+						</div>
+					</td>
+					<td><span class="badge">${escapeHtml(data.category || '')}</span></td>
+					<td class="meta">${data.prep ?? ''} / ${data.cook ?? ''}</td>
+					<td><span>${escapeHtml(data.servings || '')}</span></td>
+					<td>
+						<button class="action-edit">Edit</button>
+						<button class="action-delete">Delete</button>
+					</td>
+				`;
+				if(currentMode === 'edit' && editingId){
+					// replace existing row
+					const existing = tbody.querySelector('tr[data-id="'+editingId+'"]');
+					if(existing) existing.replaceWith(tr);
+					else tbody.appendChild(tr);
+				} else {
+					tbody.appendChild(tr);
+				}
+
+				// reset mode
+				currentMode = 'add'; editingId = null;
+
+				closeModal();
+				clearModal();
+			}).catch(err=>{
+				console.error(err);
+				alert('There was a problem saving the recipe.');
+			});
 		});
+
+		// small helper to avoid XSS when inserting plain text
+		function escapeHtml(s){
+			return String(s || '').replace(/[&<>\"]/g, function(c){
+				return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+			});
+		}
 
 		closeModalBtn.addEventListener('click', closeModal);
 		cancelBtn.addEventListener('click', closeModal);
